@@ -31,26 +31,25 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository (without submodules)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: 'false'   # 先不自动克隆子模块
+          submodules: 'false'   # 不自动克隆子模块
 
-      - name: Clone pico-sdk and fix broken submodules
+      - name: Clone pico-sdk with shallow submodules
         run: |
-          # 如果本地没有 pico-sdk，则克隆指定稳定版本
+          # 如果本地没有 pico-sdk，则克隆稳定版本（2.1.1）
           if [ ! -d "pico-sdk" ]; then
             git clone --depth 1 --branch 2.1.1 https://github.com/raspberrypi/pico-sdk.git pico-sdk
           fi
           cd pico-sdk
-          # 初始化并更新子模块，但跳过 tinyusb 下出问题的 lwip 等网络相关模块（本项目不需要）
-          git submodule update --init
-          # 对于 tinyusb，只初始化其基本部分，不递归
-          cd lib/tinyusb
-          git submodule update --init hw
-          # 如果需要，可以继续添加其他必要的子模块，但通常 hw 就足够了
-          # 回到工作目录
-          cd ../../..
+          # 初始化并递归更新子模块，使用 --depth 1 避免历史问题
+          git submodule update --init --recursive --depth 1
+          # 由于 lwip 子模块可能存在无效 commit，单独处理：移除并重新克隆正确版本（如果需要）
+          # 本项目不需要网络功能，所以直接跳过 lwip 的初始化即可
+          # 如果有 lwip 问题，执行以下命令强制更新
+          # cd lib/tinyusb && rm -rf lib/lwip && git submodule update --init --recursive --depth 1 lib/lwip || true
+          cd ../..
 
       - name: Set up ARM GCC toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
@@ -69,7 +68,6 @@ jobs:
           if [ -z "$PINS" ]; then
             PINS="PIN_SDA=4,PIN_SCL=5,PIN_XCLK=3,PIN_RST=2,PIN_D0=6,PIN_D1=7,PIN_D2=8,PIN_D3=9,PIN_D4=10,PIN_D5=11,PIN_D6=12,PIN_D7=13,PIN_PCLK=14,PIN_HREF=15,PIN_VSYNC=16"
           fi
-          # 将逗号分隔转换为分号分隔（CMake 列表格式）
           export CUSTOM_PIN_DEFINES=$(echo "$PINS" | tr ',' ';')
           echo "CUSTOM_PIN_DEFINES=$CUSTOM_PIN_DEFINES" >> $GITHUB_ENV
 
@@ -101,7 +99,6 @@ jobs:
           NEW_NAME="rp2040_ov2640_${{ env.CAMERA_MODEL }}_${{ github.run_number }}.uf2"
           mv "$UF2_FILE" "$NEW_NAME"
           echo "UF2_FILE=$NEW_NAME" >> $GITHUB_ENV
-          echo "Firmware file: $NEW_NAME"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
