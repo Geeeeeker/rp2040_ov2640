@@ -31,10 +31,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (without submodules)
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'false'   # 先不自动克隆子模块
+
+      - name: Clone pico-sdk and fix broken submodules
+        run: |
+          # 如果本地没有 pico-sdk，则克隆指定稳定版本
+          if [ ! -d "pico-sdk" ]; then
+            git clone --depth 1 --branch 2.1.1 https://github.com/raspberrypi/pico-sdk.git pico-sdk
+          fi
+          cd pico-sdk
+          # 初始化并更新子模块，但跳过 tinyusb 下出问题的 lwip 等网络相关模块（本项目不需要）
+          git submodule update --init
+          # 对于 tinyusb，只初始化其基本部分，不递归
+          cd lib/tinyusb
+          git submodule update --init hw
+          # 如果需要，可以继续添加其他必要的子模块，但通常 hw 就足够了
+          # 回到工作目录
+          cd ../../..
 
       - name: Set up ARM GCC toolchain
         uses: carlosperate/arm-none-eabi-gcc-action@v1
@@ -46,63 +62,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
-      - name: Prepare pin configuration macros
+      - name: Prepare pin configuration
         id: pins
         run: |
-          # 确定使用手动输入还是默认值
           PINS="${{ github.event.inputs.custom_pins }}"
           if [ -z "$PINS" ]; then
             PINS="PIN_SDA=4,PIN_SCL=5,PIN_XCLK=3,PIN_RST=2,PIN_D0=6,PIN_D1=7,PIN_D2=8,PIN_D3=9,PIN_D4=10,PIN_D5=11,PIN_D6=12,PIN_D7=13,PIN_PCLK=14,PIN_HREF=15,PIN_VSYNC=16"
           fi
+          # 将逗号分隔转换为分号分隔（CMake 列表格式）
+          export CUSTOM_PIN_DEFINES=$(echo "$PINS" | tr ',' ';')
+          echo "CUSTOM_PIN_DEFINES=$CUSTOM_PIN_DEFINES" >> $GITHUB_ENV
 
           CAM="${{ github.event.inputs.camera_model }}"
           if [ -z "$CAM" ]; then
             CAM="OV2640"
           fi
-
-          # 生成 CMake 可用的编译定义
-          DEFINES=""
-          IFS=',' read -ra PAIRS <<< "$PINS"
-          for pair in "${PAIRS[@]}"; do
-            key=$(echo "$pair" | cut -d'=' -f1)
-            val=$(echo "$pair" | cut -d'=' -f2)
-            DEFINES="$DEFINES -D${key}=${val}"
-          done
-          DEFINES="$DEFINES -DCAMERA_MODEL_${CAM}=1"
-
-          echo "DEFINES=$DEFINES" >> $GITHUB_ENV
-          echo "Generated defines: $DEFINES"
+          echo "CAMERA_MODEL=$CAM" >> $GITHUB_ENV
 
       - name: Configure CMake
         run: |
-              mkdir build
-                 cd build
-                  # 将逗号分隔的输入转换为分号分隔
-                  PINS="${{ github.event.inputs.custom_pins }}"
-                  if [ -z "$PINS" ]; then
-                    PINS="PIN_SDA=4,PIN_SCL=5,PIN_XCLK=3,PIN_RST=2,PIN_D0=6,PIN_D1=7,PIN_D2=8,PIN_D3=9,PIN_D4=10,PIN_D5=11,PIN_D6=12,PIN_D7=13,PIN_PCLK=14,PIN_HREF=15,PIN_VSYNC=16"
-                  fi
-                  export CUSTOM_PIN_DEFINES=$(echo "$PINS" | tr ',' ';')
-                  export CAMERA_MODEL="${{ github.event.inputs.camera_model || 'OV2640' }}"
-                  cmake .. -G "Ninja" -DPICO_SDK_PATH=${GITHUB_WORKSPACE}/pico-sdk
+          mkdir build
+          cd build
+          export PICO_SDK_PATH=${GITHUB_WORKSPACE}/pico-sdk
+          cmake .. -G "Ninja" \
+            -DPICO_SDK_PATH=${PICO_SDK_PATH} \
+            -DCUSTOM_PIN_DEFINES="${{ env.CUSTOM_PIN_DEFINES }}" \
+            -DCAMERA_MODEL="${{ env.CAMERA_MODEL }}"
 
       - name: Build firmware
         run: |
           cd build
-          # 将自定义引脚定义传递给编译器（通过修改 CMake 的编译选项）
-          # 注意：此处我们使用环境变量 DEFINES，但需要在 CMake 中应用
-          # 更简单的方法是在 CMakeLists.txt 中直接添加，或者在这里用 make 的 CFLAGS
-          # 但 Ninja 不支持简单的 CFLAGS，因此我们采用修改 CMakeLists.txt 的方式
-          # 或者直接在配置阶段传入 -DEXTRA_COMPILE_DEFINITIONS
-          # 为了简便，我们重新配置 CMake 加入自定义定义
-          cmake .. -DEXTRA_COMPILE_DEFINITIONS="${{ env.DEFINES }}"
           ninja
 
       - name: Rename output file
         run: |
           cd build
           UF2_FILE=$(ls *.uf2 | head -1)
-          NEW_NAME="rp2040_ov2640_${CAM}_${GITHUB_RUN_NUMBER}.uf2"
+          NEW_NAME="rp2040_ov2640_${{ env.CAMERA_MODEL }}_${{ github.run_number }}.uf2"
           mv "$UF2_FILE" "$NEW_NAME"
           echo "UF2_FILE=$NEW_NAME" >> $GITHUB_ENV
           echo "Firmware file: $NEW_NAME"
@@ -110,14 +106,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pico-firmware-${{ github.event.inputs.camera_model || 'OV2640' }}
+          name: pico-firmware-${{ env.CAMERA_MODEL }}
           path: build/*.uf2
           if-no-files-found: error
           retention-days: 30
 
-      # 仅当推送标签且手动触发中选择上传时执行
       - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/') && github.event.inputs.upload_to_release == 'true'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           files: build/*.uf2
