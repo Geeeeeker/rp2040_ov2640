@@ -75,9 +75,16 @@ jobs:
 
       - name: Configure CMake
         run: |
-          mkdir build
-          cd build
-          cmake .. -G "Ninja" -DPICO_SDK_PATH=${GITHUB_WORKSPACE}/pico-sdk
+              mkdir build
+                 cd build
+                  # 将逗号分隔的输入转换为分号分隔
+                  PINS="${{ github.event.inputs.custom_pins }}"
+                  if [ -z "$PINS" ]; then
+                    PINS="PIN_SDA=4,PIN_SCL=5,PIN_XCLK=3,PIN_RST=2,PIN_D0=6,PIN_D1=7,PIN_D2=8,PIN_D3=9,PIN_D4=10,PIN_D5=11,PIN_D6=12,PIN_D7=13,PIN_PCLK=14,PIN_HREF=15,PIN_VSYNC=16"
+                  fi
+                  export CUSTOM_PIN_DEFINES=$(echo "$PINS" | tr ',' ';')
+                  export CAMERA_MODEL="${{ github.event.inputs.camera_model || 'OV2640' }}"
+                  cmake .. -G "Ninja" -DPICO_SDK_PATH=${GITHUB_WORKSPACE}/pico-sdk
 
       - name: Build firmware
         run: |
