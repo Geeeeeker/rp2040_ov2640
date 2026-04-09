@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master ]
     tags:
-      - 'v*'          # 当推送版本标签时触发，用于自动发布
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -16,7 +16,6 @@ on:
         default: 'OV2640'
         options:
           - OV2640
-          # 未来可扩展其他型号
       custom_pins:
         description: 'Custom GPIO pins (KEY=VALUE,KEY2=VALUE2)'
         required: false
@@ -32,7 +31,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
@@ -47,49 +46,69 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
-      - name: Generate pin configuration header
+      - name: Prepare pin configuration macros
+        id: pins
         run: |
-          echo "// Auto-generated pin configuration" > src/pins_config.h
-          echo "#pragma once" >> src/pins_config.h
-          IFS=',' read -ra PAIRS <<< "${{ github.event.inputs.custom_pins }}"
+          # 确定使用手动输入还是默认值
+          PINS="${{ github.event.inputs.custom_pins }}"
+          if [ -z "$PINS" ]; then
+            PINS="PIN_SDA=4,PIN_SCL=5,PIN_XCLK=3,PIN_RST=2,PIN_D0=6,PIN_D1=7,PIN_D2=8,PIN_D3=9,PIN_D4=10,PIN_D5=11,PIN_D6=12,PIN_D7=13,PIN_PCLK=14,PIN_HREF=15,PIN_VSYNC=16"
+          fi
+
+          CAM="${{ github.event.inputs.camera_model }}"
+          if [ -z "$CAM" ]; then
+            CAM="OV2640"
+          fi
+
+          # 生成 CMake 可用的编译定义
+          DEFINES=""
+          IFS=',' read -ra PAIRS <<< "$PINS"
           for pair in "${PAIRS[@]}"; do
             key=$(echo "$pair" | cut -d'=' -f1)
             val=$(echo "$pair" | cut -d'=' -f2)
-            echo "#define $key $val" >> src/pins_config.h
+            DEFINES="$DEFINES -D${key}=${val}"
           done
-          # 确保摄像头型号宏
-          echo "#define CAMERA_MODEL_${{ github.event.inputs.camera_model }}" >> src/pins_config.h
-          cat src/pins_config.h
+          DEFINES="$DEFINES -DCAMERA_MODEL_${CAM}=1"
+
+          echo "DEFINES=$DEFINES" >> $GITHUB_ENV
+          echo "Generated defines: $DEFINES"
 
       - name: Configure CMake
         run: |
           mkdir build
           cd build
-          cmake .. -G "Ninja" -DPICO_SDK_PATH=${{ github.workspace }}/pico-sdk
+          cmake .. -G "Ninja" -DPICO_SDK_PATH=${GITHUB_WORKSPACE}/pico-sdk
 
       - name: Build firmware
         run: |
           cd build
+          # 将自定义引脚定义传递给编译器（通过修改 CMake 的编译选项）
+          # 注意：此处我们使用环境变量 DEFINES，但需要在 CMake 中应用
+          # 更简单的方法是在 CMakeLists.txt 中直接添加，或者在这里用 make 的 CFLAGS
+          # 但 Ninja 不支持简单的 CFLAGS，因此我们采用修改 CMakeLists.txt 的方式
+          # 或者直接在配置阶段传入 -DEXTRA_COMPILE_DEFINITIONS
+          # 为了简便，我们重新配置 CMake 加入自定义定义
+          cmake .. -DEXTRA_COMPILE_DEFINITIONS="${{ env.DEFINES }}"
           ninja
 
-      - name: Rename output files
+      - name: Rename output file
         run: |
           cd build
-          mv camera_firmware.uf2 camera_firmware-${{ github.event.inputs.camera_model }}-${{ github.run_number }}.uf2
-          mv camera_firmware.elf camera_firmware-${{ github.event.inputs.camera_model }}-${{ github.run_number }}.elf
-          echo "UF2_FILE=camera_firmware-${{ github.event.inputs.camera_model }}-${{ github.run_number }}.uf2" >> $GITHUB_ENV
+          UF2_FILE=$(ls *.uf2 | head -1)
+          NEW_NAME="rp2040_ov2640_${CAM}_${GITHUB_RUN_NUMBER}.uf2"
+          mv "$UF2_FILE" "$NEW_NAME"
+          echo "UF2_FILE=$NEW_NAME" >> $GITHUB_ENV
+          echo "Firmware file: $NEW_NAME"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pico-firmware-${{ github.event.inputs.camera_model }}
-          path: |
-            build/*.uf2
-            build/*.elf
+          name: pico-firmware-${{ github.event.inputs.camera_model || 'OV2640' }}
+          path: build/*.uf2
           if-no-files-found: error
           retention-days: 30
 
-      # 仅当推送标签且手动触发中选择上传到 Release 时执行
+      # 仅当推送标签且手动触发中选择上传时执行
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/') && github.event.inputs.upload_to_release == 'true'
         uses: softprops/action-gh-release@v1
